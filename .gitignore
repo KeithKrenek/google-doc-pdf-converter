@@ -26,3 +26,5 @@ yarn-error.log*
 
 # Environment files (local configs)
 /.env.*
+brand-strategy-report-pdf.json
+index.js
