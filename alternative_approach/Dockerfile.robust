@@ -1,0 +1,62 @@
+# Use Python 3.11 slim image for better performance
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PORT=8080
+
+# Update package list and install curl
+RUN apt-get update && apt-get install -y curl
+
+# Install WeasyPrint system dependencies with better error handling
+RUN apt-get install -y \
+    libpango-1.0-0 \
+    libharfbuzz0b \
+    libpangoft2-1.0-0 \
+    libfontconfig1 \
+    libcairo2 \
+    libffi-dev \
+    shared-mime-info \
+    && apt-get clean
+
+# Try multiple package names for gdk-pixbuf (different Debian versions)
+RUN (apt-get install -y libgdk-pixbuf-2.0-0 || \
+     apt-get install -y libgdk-pixbuf2.0-0 || \
+     apt-get install -y libgdk-pixbuf-xlib-2.0-0 || \
+     echo "Warning: gdk-pixbuf not found, trying to continue...")
+
+# Install fonts
+RUN apt-get install -y \
+    fonts-dejavu-core \
+    fonts-liberation \
+    fonts-noto-core \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set work directory
+WORKDIR /app
+
+# Copy and install requirements
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Test WeasyPrint installation
+RUN python -c "import weasyprint; print('WeasyPrint OK')"
+
+# Copy application code
+COPY main.py .
+COPY .env* ./
+
+# Create directories and user
+RUN mkdir -p /tmp/pdf_temp
+RUN groupadd -r appuser && useradd -r -g appuser appuser
+RUN chown -R appuser:appuser /app /tmp/pdf_temp
+USER appuser
+
+# Expose port and set health check
+EXPOSE 8080
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Run application
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 0 main:app

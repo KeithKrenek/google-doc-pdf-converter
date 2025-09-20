@@ -28,3 +28,4 @@ yarn-error.log*
 /.env.*
 brand-strategy-report-pdf.json
 index.js
+.env

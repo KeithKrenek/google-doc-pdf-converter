@@ -1,0 +1,607 @@
+#!/bin/bash
+
+# Simple fix for PDF conversion error - No Python required
+# This script manually replaces the problematic code
+
+set -e
+
+# Color codes
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+echo -e "${BLUE}========================================${NC}"
+echo -e "${BLUE}Simple Fix for PDF Conversion Error${NC}"
+echo -e "${BLUE}========================================${NC}"
+
+# Check if main.py exists
+if [ ! -f "main.py" ]; then
+    echo -e "${RED}❌ main.py not found in current directory${NC}"
+    exit 1
+fi
+
+# Backup current main.py
+cp main.py main.py.backup
+echo -e "${GREEN}✅ Backed up main.py to main.py.backup${NC}"
+
+# Create the fixed main.py
+echo -e "${YELLOW}🔧 Creating fixed main.py...${NC}"
+
+cat > main.py << 'EOF'
+from flask import Flask, request, jsonify, send_file
+from google.oauth2.service_account import Credentials
+from googleapiclient.discovery import build
+from google.cloud import storage
+import os
+import json
+import re
+import tempfile
+import logging
+from datetime import datetime
+import weasyprint
+from jinja2 import Template
+import requests
+from urllib.parse import urlparse, parse_qs
+import base64
+from io import BytesIO
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = Flask(__name__)
+
+# Configuration
+SCOPES = ['https://www.googleapis.com/auth/documents.readonly']
+BUCKET_NAME = os.environ.get('BUCKET_NAME', 'your-pdf-assets-bucket')
+
+class GoogleDocToPDFConverter:
+    def __init__(self):
+        self.setup_google_services()
+        self.storage_client = storage.Client()
+        
+    def setup_google_services(self):
+        """Initialize Google API services"""
+        try:
+            # Use service account credentials from environment
+            credentials_json = os.environ.get('GOOGLE_CREDENTIALS_JSON')
+            if credentials_json:
+                credentials_info = json.loads(credentials_json)
+                credentials = Credentials.from_service_account_info(
+                    credentials_info, scopes=SCOPES
+                )
+            else:
+                # Fallback to default credentials
+                credentials = None
+                
+            self.docs_service = build('docs', 'v1', credentials=credentials)
+            logger.info("Google Docs service initialized successfully")
+        except Exception as e:
+            logger.error(f"Failed to initialize Google services: {e}")
+            raise
+    
+    def extract_document_id(self, doc_url):
+        """Extract document ID from Google Docs URL"""
+        try:
+            # Handle various Google Docs URL formats
+            if '/document/d/' in doc_url:
+                doc_id = doc_url.split('/document/d/')[1].split('/')[0]
+            else:
+                # Try to extract from other formats
+                parsed = urlparse(doc_url)
+                if 'id' in parse_qs(parsed.query):
+                    doc_id = parse_qs(parsed.query)['id'][0]
+                else:
+                    raise ValueError("Cannot extract document ID from URL")
+            
+            logger.info(f"Extracted document ID: {doc_id}")
+            return doc_id
+        except Exception as e:
+            logger.error(f"Error extracting document ID: {e}")
+            raise ValueError(f"Invalid Google Docs URL: {e}")
+    
+    def get_document_content(self, document_id):
+        """Retrieve document content from Google Docs API"""
+        try:
+            document = self.docs_service.documents().get(documentId=document_id).execute()
+            logger.info(f"Retrieved document: {document.get('title', 'Untitled')}")
+            return document
+        except Exception as e:
+            logger.error(f"Error retrieving document: {e}")
+            raise ValueError(f"Failed to retrieve document: {e}")
+    
+    def extract_text_and_structure(self, document):
+        """Extract text content and structure from document"""
+        content = document.get('body', {}).get('content', [])
+        extracted_data = {
+            'title': document.get('title', 'Untitled Document'),
+            'sections': [],
+            'images': []
+        }
+        
+        current_section = {'type': 'paragraph', 'content': '', 'style': 'normal'}
+        
+        for element in content:
+            if 'paragraph' in element:
+                paragraph = element['paragraph']
+                text_content = ''
+                style = 'normal'
+                
+                # Extract text from paragraph elements
+                for text_element in paragraph.get('elements', []):
+                    if 'textRun' in text_element:
+                        text_run = text_element['textRun']
+                        text_content += text_run.get('content', '')
+                        
+                        # Determine style based on formatting
+                        text_style = text_run.get('textStyle', {})
+                        if text_style.get('bold', False):
+                            if text_style.get('fontSize', {}).get('magnitude', 0) > 14:
+                                style = 'heading'
+                            else:
+                                style = 'bold'
+                
+                # Clean up text content
+                text_content = text_content.strip()
+                if text_content:
+                    extracted_data['sections'].append({
+                        'type': 'paragraph',
+                        'content': text_content,
+                        'style': style
+                    })
+            
+            elif 'sectionBreak' in element:
+                # Handle section breaks
+                extracted_data['sections'].append({
+                    'type': 'section_break',
+                    'content': '',
+                    'style': 'break'
+                })
+        
+        return extracted_data
+    
+    def generate_pdf_content(self, document_data, custom_input=None):
+        """Generate HTML content for PDF conversion"""
+        
+        # HTML template for the PDF
+        html_template = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <style>
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;800&display=swap');
+                
+                * {
+                    margin: 0;
+                    padding: 0;
+                    box-sizing: border-box;
+                }
+                
+                body {
+                    font-family: 'Inter', sans-serif;
+                    line-height: 1.6;
+                    color: #333;
+                    background: #fff;
+                }
+                
+                .cover-page {
+                    height: 100vh;
+                    background: linear-gradient(135deg, #000000 0%, #1a1a1a 50%, #000000 100%);
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: center;
+                    align-items: center;
+                    text-align: center;
+                    color: white;
+                    page-break-after: always;
+                    position: relative;
+                    overflow: hidden;
+                }
+                
+                .cover-image {
+                    position: absolute;
+                    top: 20%;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    width: 300px;
+                    height: 300px;
+                    opacity: 0.8;
+                }
+                
+                .main-title {
+                    font-size: 4.5rem;
+                    font-weight: 800;
+                    letter-spacing: 0.1em;
+                    margin: 2rem 0;
+                    z-index: 2;
+                    position: relative;
+                    text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+                }
+                
+                .subtitle {
+                    font-size: 2rem;
+                    font-weight: 400;
+                    margin: 1rem 0 3rem 0;
+                    z-index: 2;
+                    position: relative;
+                }
+                
+                .brand-name {
+                    position: absolute;
+                    bottom: 10%;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    font-size: 2.5rem;
+                    font-weight: 700;
+                    letter-spacing: 0.15em;
+                }
+                
+                .content-page {
+                    padding: 3rem;
+                    max-width: 800px;
+                    margin: 0 auto;
+                    min-height: calc(100vh - 6rem);
+                    position: relative;
+                }
+                
+                .content-section {
+                    margin-bottom: 2rem;
+                }
+                
+                .heading {
+                    font-size: 1.8rem;
+                    font-weight: 700;
+                    color: #2c3e50;
+                    margin: 2rem 0 1rem 0;
+                    border-bottom: 2px solid #3498db;
+                    padding-bottom: 0.5rem;
+                }
+                
+                .paragraph {
+                    font-size: 1rem;
+                    line-height: 1.8;
+                    margin-bottom: 1.5rem;
+                    text-align: justify;
+                }
+                
+                .bold {
+                    font-weight: 600;
+                    margin-bottom: 1rem;
+                }
+                
+                .footer {
+                    position: fixed;
+                    bottom: 2rem;
+                    left: 3rem;
+                    right: 3rem;
+                    text-align: center;
+                    font-size: 0.9rem;
+                    color: #666;
+                    border-top: 1px solid #eee;
+                    padding-top: 1rem;
+                }
+                
+                .page-number {
+                    position: fixed;
+                    bottom: 1rem;
+                    right: 3rem;
+                    font-size: 0.8rem;
+                    color: #999;
+                }
+                
+                @page {
+                    size: A4;
+                    margin: 0;
+                }
+                
+                @media print {
+                    .cover-page {
+                        height: 297mm;
+                    }
+                    
+                    .content-page {
+                        min-height: calc(297mm - 6rem);
+                    }
+                }
+            </style>
+        </head>
+        <body>
+            <!-- Cover Page -->
+            <div class="cover-page">
+                {% if cover_image %}
+                <div class="cover-image">
+                    <!-- Golden drop effect placeholder -->
+                    <svg width="300" height="300" viewBox="0 0 300 300" xmlns="http://www.w3.org/2000/svg">
+                        <defs>
+                            <radialGradient id="goldGradient" cx="50%" cy="30%" r="50%">
+                                <stop offset="0%" stop-color="#FFD700"/>
+                                <stop offset="50%" stop-color="#FFA500"/>
+                                <stop offset="100%" stop-color="#FF8C00"/>
+                            </radialGradient>
+                        </defs>
+                        <path d="M150 50 Q120 80 120 120 Q120 160 150 180 Q180 160 180 120 Q180 80 150 50 Z" fill="url(#goldGradient)" opacity="0.8"/>
+                        <ellipse cx="150" cy="200" rx="60" ry="15" fill="url(#goldGradient)" opacity="0.3"/>
+                    </svg>
+                </div>
+                {% endif %}
+                
+                <h1 class="main-title">{{ main_title }}</h1>
+                <p class="subtitle">{{ subtitle }}</p>
+                
+                {% if brand_name %}
+                <div class="brand-name">{{ brand_name }}</div>
+                {% endif %}
+            </div>
+            
+            <!-- Content Pages -->
+            {% for section in sections %}
+                {% if loop.first or section.style == 'section_break' %}
+                <div class="content-page">
+                {% endif %}
+                
+                {% if section.style == 'heading' %}
+                    <h2 class="heading">{{ section.content }}</h2>
+                {% elif section.style == 'bold' %}
+                    <p class="bold">{{ section.content }}</p>
+                {% elif section.style == 'paragraph' %}
+                    <p class="paragraph">{{ section.content }}</p>
+                {% endif %}
+                
+                {% if loop.last or sections[loop.index].style == 'section_break' %}
+                </div>
+                {% endif %}
+            {% endfor %}
+            
+            <!-- Footer on all pages except cover -->
+            <div class="footer">
+                {% if brand_name %}{{ brand_name }}{% endif %}
+            </div>
+        </body>
+        </html>
+        """
+        
+        # Prepare template data
+        template_data = {
+            'main_title': self.extract_main_title(document_data),
+            'subtitle': self.extract_subtitle(document_data, custom_input),
+            'brand_name': custom_input if custom_input else "PROFESSIONAL BRAND",
+            'sections': document_data['sections'],
+            'cover_image': True  # We'll include a default cover image
+        }
+        
+        template = Template(html_template)
+        return template.render(**template_data)
+    
+    def extract_main_title(self, document_data):
+        """Extract main title from document data"""
+        # Look for the first heading or use document title
+        for section in document_data['sections']:
+            if section['style'] == 'heading':
+                return section['content'].upper()
+        
+        # Fallback to document title
+        title = document_data['title'].upper()
+        if len(title) > 50:
+            title = "PROFESSIONAL DOCUMENT"
+        return title
+    
+    def extract_subtitle(self, document_data, custom_input):
+        """Extract subtitle from document data"""
+        # Look for second heading or create from first paragraph
+        headings = [s for s in document_data['sections'] if s['style'] == 'heading']
+        
+        if len(headings) > 1:
+            return headings[1]['content']
+        
+        # Create subtitle from first paragraph or custom input
+        if custom_input:
+            return f"Insights: {custom_input}"
+        
+        paragraphs = [s for s in document_data['sections'] if s['style'] == 'paragraph']
+        if paragraphs:
+            first_para = paragraphs[0]['content'][:100]
+            return f"Preliminary Insights: {first_para.split('.')[0]}"
+        
+        return "Preliminary Insights: Defining the Core"
+    
+    def convert_to_pdf(self, html_content):
+        """Convert HTML to PDF using WeasyPrint - FIXED VERSION"""
+        try:
+            # Create temporary file for PDF
+            temp_pdf = tempfile.NamedTemporaryFile(suffix='.pdf', delete=False)
+            temp_pdf.close()  # Close the file so WeasyPrint can write to it
+            
+            # Generate PDF with proper WeasyPrint API usage
+            try:
+                # First try with basic configuration
+                html_doc = weasyprint.HTML(string=html_content, base_url='.')
+                html_doc.write_pdf(temp_pdf.name)
+                
+                logger.info(f"PDF generated successfully: {temp_pdf.name}")
+                return temp_pdf.name
+                
+            except Exception as weasy_error:
+                logger.error(f"WeasyPrint failed: {weasy_error}")
+                # Clean up the temp file if it failed
+                if os.path.exists(temp_pdf.name):
+                    os.unlink(temp_pdf.name)
+                raise weasy_error
+                
+        except Exception as e:
+            logger.error(f"Error converting to PDF: {e}")
+            raise ValueError(f"PDF conversion failed: {e}")
+    
+    def upload_to_storage(self, file_path, destination_name):
+        """Upload generated PDF to Cloud Storage"""
+        try:
+            bucket = self.storage_client.bucket(BUCKET_NAME)
+            blob = bucket.blob(f'generated/{destination_name}')
+            
+            blob.upload_from_filename(file_path)
+            blob.make_public()
+            
+            logger.info(f"PDF uploaded to storage: {destination_name}")
+            return blob.public_url
+        except Exception as e:
+            logger.error(f"Error uploading to storage: {e}")
+            return None
+
+# Initialize converter
+converter = GoogleDocToPDFConverter()
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({'status': 'healthy', 'timestamp': datetime.utcnow().isoformat()})
+
+@app.route('/convert', methods=['POST'])
+def convert_document():
+    """Main endpoint for document conversion"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+        
+        doc_url = data.get('doc_url')
+        custom_input = data.get('custom_input', '')
+        
+        if not doc_url:
+            return jsonify({'error': 'doc_url is required'}), 400
+        
+        logger.info(f"Starting conversion for URL: {doc_url}")
+        
+        # Extract document ID
+        document_id = converter.extract_document_id(doc_url)
+        
+        # Get document content
+        document = converter.get_document_content(document_id)
+        
+        # Extract text and structure
+        document_data = converter.extract_text_and_structure(document)
+        
+        # Generate HTML content
+        html_content = converter.generate_pdf_content(document_data, custom_input)
+        
+        # Convert to PDF
+        pdf_path = converter.convert_to_pdf(html_content)
+        
+        # Generate unique filename
+        timestamp = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+        pdf_filename = f"document_{document_id}_{timestamp}.pdf"
+        
+        # Upload to storage
+        public_url = converter.upload_to_storage(pdf_path, pdf_filename)
+        
+        # Clean up temporary file
+        os.unlink(pdf_path)
+        
+        response_data = {
+            'success': True,
+            'document_title': document_data['title'],
+            'pdf_filename': pdf_filename,
+            'download_url': public_url,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        logger.info(f"Conversion completed successfully: {pdf_filename}")
+        return jsonify(response_data)
+        
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Unexpected error: {e}")
+        return jsonify({'error': 'Internal server error', 'details': str(e)}), 500
+
+@app.route('/download/<filename>', methods=['GET'])
+def download_file(filename):
+    """Download generated PDF file"""
+    try:
+        bucket = converter.storage_client.bucket(BUCKET_NAME)
+        blob = bucket.blob(f'generated/{filename}')
+        
+        if not blob.exists():
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Download to temporary file and serve
+        temp_file = tempfile.NamedTemporaryFile(delete=False)
+        blob.download_to_filename(temp_file.name)
+        
+        return send_file(
+            temp_file.name,
+            as_attachment=True,
+            download_name=filename,
+            mimetype='application/pdf'
+        )
+    except Exception as e:
+        logger.error(f"Error downloading file: {e}")
+        return jsonify({'error': 'Download failed'}), 500
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False)
+EOF
+
+echo -e "${GREEN}✅ Created fixed main.py${NC}"
+
+# Update requirements.txt to use more stable WeasyPrint version
+if [ -f "requirements.txt" ]; then
+    echo -e "${YELLOW}🔧 Updating WeasyPrint version...${NC}"
+    cp requirements.txt requirements.txt.backup
+    sed 's/weasyprint==59.0/weasyprint==60.2/' requirements.txt.backup > requirements.txt
+    echo -e "${GREEN}✅ Updated WeasyPrint to version 60.2${NC}"
+fi
+
+# Get project info
+PROJECT_ID=$(gcloud config get-value project)
+REGION="us-central1"
+SERVICE_NAME="doc-to-pdf-converter"
+
+echo -e "${YELLOW}🚀 Rebuilding and deploying...${NC}"
+echo "Project: $PROJECT_ID"
+echo "Service: $SERVICE_NAME"
+echo "Region: $REGION"
+
+# Build and deploy
+gcloud builds submit --config cloudbuild.yaml \
+    --substitutions=_REGION=$REGION,_BUCKET_NAME=$PROJECT_ID-pdf-assets
+
+echo -e "${YELLOW}⏳ Waiting for deployment to complete...${NC}"
+sleep 30
+
+# Test the fix
+echo -e "${YELLOW}🧪 Testing the fix...${NC}"
+SERVICE_URL=$(gcloud run services describe $SERVICE_NAME --region=$REGION --format="value(status.url)")
+
+echo "Testing health check..."
+if curl -s -f "$SERVICE_URL/health" > /dev/null; then
+    echo -e "${GREEN}✅ Health check passed${NC}"
+    
+    echo -e "\n${YELLOW}Testing PDF conversion...${NC}"
+    # Test with a simple document
+    TEST_RESPONSE=$(curl -s -X POST "$SERVICE_URL/convert" \
+      -H "Content-Type: application/json" \
+      -d '{
+        "doc_url": "https://docs.google.com/document/d/1zByXFPhVznKanor06iRs5qLh5Mi7A7Ok_0Ph9eps-yA/edit",
+        "custom_input": "Test Company"
+      }')
+    
+    if echo "$TEST_RESPONSE" | grep -q '"success":true'; then
+        echo -e "${GREEN}✅ PDF conversion test passed!${NC}"
+    else
+        echo -e "${RED}❌ PDF conversion still failing${NC}"
+        echo "Response: $TEST_RESPONSE"
+    fi
+else
+    echo -e "${RED}❌ Health check failed${NC}"
+fi
+
+echo -e "\n${GREEN}========================================${NC}"
+echo -e "${GREEN}Fix Complete!${NC}"
+echo -e "${GREEN}========================================${NC}"
+
+echo -e "\n${YELLOW}Service URL: $SERVICE_URL${NC}"
+echo -e "${YELLOW}Test again with: ./test-conversion.sh${NC}"
