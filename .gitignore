@@ -79,6 +79,3 @@ logs/
 
 # Generated PDFs (for testing)
 *.pdf
-
-# Docker
-.dockerignore
