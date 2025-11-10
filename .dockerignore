@@ -1,0 +1,67 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info
+dist
+build
+venv/
+env/
+ENV/
+
+# Documentation
+README.md
+QUICKSTART.md
+LICENSE
+*.md
+docs/
+
+# Development files
+.env
+.env.*
+service-account-key.json
+*-key.json
+credentials.json
+
+# Testing
+test_*.py
+tests/
+.pytest_cache/
+.coverage
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# CI/CD
+.github/
+cloudbuild.yaml
+.dockerignore
+
+# Scripts
+setup.sh
+deploy.sh
+alternative_approach/
+
+# Node/Frontend (not needed for Python service)
+node_modules/
+package.json
+package-lock.json
+frontend/
+backend/
+
+# Temporary
+*.log
+*.tmp
+tmp/
